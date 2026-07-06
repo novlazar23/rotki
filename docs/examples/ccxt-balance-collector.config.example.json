@@ -1,0 +1,15 @@
+{
+  "min_total": "0",
+  "include_zero": false,
+  "exchanges": [
+    {
+      "id": "bybit",
+      "name": "bybit-main",
+      "api_key_env": "BYBIT_API_KEY",
+      "secret_env": "BYBIT_API_SECRET",
+      "options": {
+        "defaultType": "spot"
+      }
+    }
+  ]
+}
