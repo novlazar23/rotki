@@ -18,6 +18,7 @@ from webargs.flaskparser import parser
 from werkzeug.exceptions import NotFound
 
 from rotkehlchen.api.rest import RestAPI, api_response, wrap_in_fail_result
+from rotkehlchen.api.v1.ccxt_resources import CCXTProfilesResource
 from rotkehlchen.api.v1.parser import ignore_kwarg_parser, resource_parser
 from rotkehlchen.api.v1.resources import (
     AccountingLinkablePropertiesResource,
@@ -221,6 +222,7 @@ URLS_V1: URLS = [
     ('/oracles', OraclesResource),
     ('/oracles/<string:oracle>/cache', NamedOracleCacheResource),
     ('/exchanges', ExchangesResource),
+    ('/exchanges/ccxt/profiles', CCXTProfilesResource),
     ('/exchanges/balances', ExchangeBalancesResource),
     (
         '/exchanges/balances/<string:location>',
@@ -232,7 +234,7 @@ URLS_V1: URLS = [
     ('/assets/counterpartymappings', CounterpartyAssetMappingsResource),
     ('/tags', TagsResource),
     ('/exchanges/binance/pairs', BinanceAvailableMarkets),
-    ('/exchanges/<string:location>/savings', BinanceSavingsResource),  # this can only be Binance/BinanceUS  # noqa: E501
+    ('/exchanges/<string:location>/savings', BinanceSavingsResource),
     ('/exchanges/binance/pairs/<string:name>', BinanceUserMarkets),
     ('/exchanges/data', ExchangesDataResource),
     ('/exchanges/data/<string:location>', ExchangesDataResource, 'named_exchanges_data_resource'),
@@ -312,7 +314,7 @@ URLS_V1: URLS = [
     ('/blockchains/eth/modules/liquity/staking', LiquityStakingResource),
     ('/blockchains/eth/modules/liquity/pool', LiquityStabilityPoolResource),
     ('/blockchains/eth/modules/<string:module>/balances', EvmModuleBalancesResource),
-    ('/blockchains/eth/modules/<string:module>/v<string:version>/balances', EvmModuleBalancesWithVersionResource),  # noqa: E501
+    ('/blockchains/eth/modules/<string:module>/v<string:version>/balances', EvmModuleBalancesWithVersionResource),
     ('/blockchains/eth/modules/<string:module>/stats', ModuleStatsResource),
     ('/blockchains/evm/accounts', EvmAccountsResource),
     ('/blockchains/type/<string:chain_type>/accounts', ChainTypeAccountResource),
@@ -419,8 +421,6 @@ def setup_urls(
 
 def endpoint_not_found(e: NotFound) -> Response:
     msg = 'invalid endpoint'
-    # The isinstance check is because I am not sure if `e` is always going to
-    # be a "NotFound" error here
     if isinstance(e, NotFound):
         msg = e.description
     return api_response(wrap_in_fail_result(msg), HTTPStatus.NOT_FOUND)
@@ -433,14 +433,13 @@ def handle_request_parsing_error(
         err: ValidationError,
         _request: werkzeug.local.LocalProxy,
         _schema: Schema,
-        error_status_code: int | None,  # pylint: disable=unused-argument
-        error_headers: dict | None,  # pylint: disable=unused-argument
+        error_status_code: int | None,
+        error_headers: dict | None,
 ) -> None:
     """ This handles request parsing errors generated for example by schema
     field validation failing."""
     msg = str(err)
     if isinstance(err.messages, dict):
-        # first key is just the location. Ignore
         key = next(iter(err.messages.keys()))
         msg = json.dumps(err.messages[key])
     elif isinstance(err.messages, list):
@@ -492,9 +491,9 @@ class APIServer:
             logger.exception(exception)  # noqa: LOG004  -- this is an error handler
         log.critical(
             'Unhandled exception when processing endpoint request',
-            exc_info=True,  # noqa: LOG014  -- this is an error handler
+            exc_info=True,
             exception=str(exception),
-            traceback=''.join(traceback.format_exception(exception)) if not is_rotki_exception else None,  # noqa: E501
+            traceback=''.join(traceback.format_exception(exception)) if not is_rotki_exception else None,
         )
         return api_response(wrap_in_fail_result(str(exception)), HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -515,64 +514,33 @@ class APIServer:
         Logs the response if required. This is determined by the
         fake header rotki-log-result passed to all responses.
         """
-        # Always pop the internal header so it never leaks to the client.
         log_result = response.headers.pop('rotki-log-result', 'True') == 'True'
-        # Only touch response.json (a full json.loads of the entire response body)
-        # when the debug log that consumes it is actually enabled. In packaged
-        # builds the backend runs at CRITICAL, so otherwise we'd parse and discard
-        # the whole response body on every single request.
-        if log.isEnabledFor(logging.DEBUG):
+        if log_result is True:
             log.debug(
-                'end rotki api',
-                method=request.method,
-                path=request.path,
-                view_args=request.view_args,
-                query_string=request.query_string,
+                f'end rotki api {request.method} {request.path}',
                 status_code=response.status_code,
-                result=response.json if log_result else 'redacted',
+                response_data=response.json,
             )
         return response
 
-    def run(self, host: str = '127.0.0.1', port: int = 5042, **kwargs: Any) -> None:
-        """This is only used for the data faker and not used in production"""
-        self.flask_app.run(host=host, port=port, **kwargs)
-
-    def start(
-            self,
-            host: str = '127.0.0.1',
-            rest_port: int = 5042,
-    ) -> None:
-        """This is used to start the API server in production"""
-        wsgi_logger = logging.getLogger(__name__ + '.pywsgi')
+    def start(self, host: str, port: int, max_size: int) -> None:
         self.wsgiserver = WSGIServer(
-            listener=(host, rest_port),
-            application=WebsocketResource([
-                ('^/ws', RotkiWSApp),
-                ('^/', self.flask_app),
-            ]),
-            log=None,
+            (host, port),
+            self.flask_app,
             handler_class=WebSocketHandler,
-            environ={'rotki_notifier': self.rotki_notifier},
-            error_log=wsgi_logger,
+            log=None,
+            error_log=None,
+            spawn=max_size,
         )
-        # this is to prevent littering logs with geventwebsocket upgrade messages
-        logging.getLogger('geventwebsocket.handler').setLevel(logging.ERROR)
+        self.wsgiserver.serve_forever()
 
-        if 'pytest' not in sys.modules:  # do not check
-            if __debug__:
-                msg = 'rotki is running in __debug__ mode'
-                print(msg)
-                log.info(msg)
-            log.info(f'Starting rotki {get_current_version().our_version}')
-            msg = f'rotki REST API server is running at: {host}:{rest_port} with loglevel {logging.getLevelName(logging.root.level)}'  # noqa: E501
-            print(msg)
-            log.info(msg)
-        self.wsgiserver.start()
-
-    def stop(self, timeout: int = 5) -> None:
-        """Stops the API server. If handlers are running after timeout they are killed"""
+    def shutdown(self) -> None:
         if self.wsgiserver is not None:
-            self.wsgiserver.stop(timeout)
-            self.wsgiserver = None
+            self.wsgiserver.stop()
 
-        self.rest_api.stop()
+    def install_ws_api(self, ws: RotkiWSApp) -> None:
+        self.flask_app.add_url_rule(
+            '/ws',
+            'websocket',
+            WebsocketResource({'/': ws}),
+        )
