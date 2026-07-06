@@ -29,10 +29,15 @@ libcrypto-1_1-x64.dll
 /.run/
 frontend/logs
 .venv
+.venv-ccxt/
 .pnpm-debug.log
 colibri/target
 **/.claude/
 out
+out/
+ccxt-balance-collector.config.json
+.env
+.env.*
 .codexbox-out/
 # benchmark harness outputs
 bench-result.json
