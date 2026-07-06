@@ -89,6 +89,45 @@ def is_transient_history_error(error: Exception) -> bool:
     return any(marker.replace(" ", "") in message for marker in TRANSIENT_ERROR_MARKERS)
 
 
+def deep_merge_dicts(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, Mapping) and isinstance(result.get(key), Mapping):
+            result[key] = deep_merge_dicts(result[key], value)  # type: ignore[arg-type]
+        else:
+            result[key] = value
+    return result
+
+
+def merged_variant_config(base_config: Mapping[str, Any], variant_config: Mapping[str, Any], index: int) -> dict[str, Any]:
+    base_without_variants = {key: value for key, value in base_config.items() if key != "variants"}
+    variant_without_name = {
+        key: value for key, value in variant_config.items()
+        if key not in {"name", "full_name"}
+    }
+    merged = deep_merge_dicts(base_without_variants, variant_without_name)
+
+    base_name = str(base_config.get("name") or base_config.get("id") or "exchange")
+    variant_name = str(variant_config.get("name") or f"variant-{index}")
+    merged["name"] = str(variant_config.get("full_name") or f"{base_name}-{variant_name}")
+    return merged
+
+
+def expand_exchange_configs(exchange_config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    variants = exchange_config.get("variants")
+    if variants is None:
+        return [dict(exchange_config)]
+    if not isinstance(variants, list) or len(variants) == 0:
+        raise ValueError("variants must be a non-empty list when set")
+
+    expanded: list[dict[str, Any]] = []
+    for index, variant in enumerate(variants, start=1):
+        if not isinstance(variant, Mapping):
+            raise ValueError("Each variant must be an object")
+        expanded.append(merged_variant_config(exchange_config, variant, index))
+    return expanded
+
+
 def endpoint_params(params: dict[str, Any], method_name: str) -> dict[str, Any]:
     method_params = params.get(method_name)
     merged = {key: value for key, value in params.items() if not isinstance(value, dict)}
@@ -385,10 +424,11 @@ def collect_history(config: Mapping[str, Any]) -> dict[str, Any]:
     for exchange_config in exchanges:
         if not isinstance(exchange_config, Mapping):
             raise ValueError("Each exchange config must be an object")
-        trades, movements, errors = collect_exchange_history(exchange_config)
-        all_trades.extend(trades)
-        all_movements.extend(movements)
-        all_errors.extend(errors)
+        for expanded_config in expand_exchange_configs(exchange_config):
+            trades, movements, errors = collect_exchange_history(expanded_config)
+            all_trades.extend(trades)
+            all_movements.extend(movements)
+            all_errors.extend(errors)
 
     result = HistoryResult(
         collected_at=utc_now_iso(),
