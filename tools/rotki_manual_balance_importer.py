@@ -10,12 +10,15 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+UNKNOWN_ASSET_PATTERN = re.compile(r"Unknown asset ([^ ]+) provided\.")
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,13 @@ class PlannedImport:
     delete_payload: dict[str, Any] | None
     existing_labels: list[str]
     existing_check: str
+
+
+class RotkiAPIError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None, body: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
 
 
 def read_json_file(path: Path) -> dict[str, Any]:
@@ -68,9 +78,13 @@ class RotkiAPIClient:
                 response_body = response.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"rotki API {method} {path} failed with HTTP {e.code}: {error_body}") from e
+            raise RotkiAPIError(
+                f"rotki API {method} {path} failed with HTTP {e.code}: {error_body}",
+                status_code=e.code,
+                body=error_body,
+            ) from e
         except urllib.error.URLError as e:
-            raise RuntimeError(f"rotki API {method} {path} failed: {e.reason}") from e
+            raise RotkiAPIError(f"rotki API {method} {path} failed: {e.reason}") from e
 
         if response_body == "":
             return {}
@@ -99,6 +113,29 @@ class RotkiAPIClient:
         if not balances:
             raise ValueError("No balances to add")
         return self.request("PUT", "/balances/manual", {"async_query": False, "balances": balances})
+
+
+def parse_unknown_assets_from_api_error(error: RotkiAPIError) -> list[str]:
+    if error.status_code != 400 or error.body == "":
+        return []
+
+    candidates = [error.body]
+    try:
+        outer = json.loads(error.body)
+        if isinstance(outer, dict) and isinstance(outer.get("message"), str):
+            candidates.append(outer["message"])
+            try:
+                inner = json.loads(outer["message"])
+                candidates.append(json.dumps(inner))
+            except json.JSONDecodeError:
+                pass
+    except json.JSONDecodeError:
+        pass
+
+    unknown_assets: set[str] = set()
+    for candidate in candidates:
+        unknown_assets.update(UNKNOWN_ASSET_PATTERN.findall(candidate))
+    return sorted(unknown_assets)
 
 
 def candidate_to_rotki_balance(candidate: dict[str, Any], *, include_tags: bool) -> dict[str, Any]:
@@ -155,6 +192,20 @@ def load_rotki_balances_from_payload(payload: dict[str, Any], *, include_tags: b
     if not balances:
         raise ValueError("No manual balance candidates found")
     return balances
+
+
+def filter_balances_by_assets(
+        balances: list[dict[str, Any]],
+        assets_to_skip: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for balance in balances:
+        if str(balance.get("asset")) in assets_to_skip:
+            skipped.append(balance)
+        else:
+            kept.append(balance)
+    return kept, skipped
 
 
 def select_existing_by_label_prefix(existing: list[dict[str, Any]], label_prefix: str) -> tuple[list[int], list[str]]:
@@ -227,11 +278,51 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run-output", type=Path, help="Write the planned API payload to a file")
     parser.add_argument("--check-existing", action="store_true", help="Query rotki during dry-run to detect existing prefixed manual balances")
     parser.add_argument("--apply", action="store_true", help="Actually write to rotki")
+    parser.add_argument("--skip-unknown-assets", action="store_true", help="On apply, skip balances whose assets are unknown to rotki and retry the import")
     parser.add_argument("--replace-prefix", default="ccxt", help="Delete existing manual balances whose label starts with this prefix before adding")
     parser.add_argument("--no-replace", action="store_true", help="Do not delete existing prefixed manual balances before adding")
     parser.add_argument("--include-tags", action="store_true", help="Send candidate tags to rotki. Tags must already exist in rotki")
     parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout in seconds")
     return parser.parse_args()
+
+
+def apply_import(
+        client: RotkiAPIClient,
+        plan: PlannedImport,
+        *,
+        skip_unknown_assets: bool,
+) -> dict[str, Any]:
+    if plan.delete_payload is not None:
+        client.delete_manual_balance_ids(plan.delete_payload["ids"])
+
+    try:
+        response = client.add_manual_balances(plan.add_payload["balances"])
+        return {
+            "result": extract_result(response),
+            "skipped_unknown_assets": [],
+            "skipped_balances": [],
+        }
+    except RotkiAPIError as e:
+        unknown_assets = parse_unknown_assets_from_api_error(e)
+        if not skip_unknown_assets or not unknown_assets:
+            raise
+
+        retry_balances, skipped_balances = filter_balances_by_assets(
+            plan.add_payload["balances"],
+            set(unknown_assets),
+        )
+        if not retry_balances:
+            raise ValueError(
+                "All balances would be skipped because their assets are unknown to rotki: "
+                + ", ".join(unknown_assets),
+            ) from e
+
+        response = client.add_manual_balances(retry_balances)
+        return {
+            "result": extract_result(response),
+            "skipped_unknown_assets": unknown_assets,
+            "skipped_balances": skipped_balances,
+        }
 
 
 def main() -> int:
@@ -260,10 +351,12 @@ def main() -> int:
             write_plan(args.dry_run_output, plan)
             return 0
 
-        if plan.delete_payload is not None:
-            client.delete_manual_balance_ids(plan.delete_payload["ids"])
-        response = client.add_manual_balances(plan.add_payload["balances"])
-        print(json.dumps({"result": extract_result(response)}, indent=2, sort_keys=True))
+        result = apply_import(
+            client,
+            plan,
+            skip_unknown_assets=args.skip_unknown_assets,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
     except Exception as e:  # noqa: BLE001 - concise CLI diagnostics
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
