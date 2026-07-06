@@ -65,17 +65,70 @@ eip155:137/erc20:0x0000000000000000000000000000000000001010
 
 The identity mappings for `CHIP`, `CSPR`, `GRAM`, `MMT`, `RESOLV`, and `ROOT` still require the asset to exist in the local rotki global database. If `--validate` marks one of them as missing, add the asset in rotki first or update the global asset database before importing the balance.
 
-## Integration point
+## Drop-in integration for an external importer
 
-External balance importers should call the mapping before constructing rotki manual balances:
+The external importer should map every raw CCXT balance before it creates the rotki manual balance payload.
+
+For a single row:
 
 ```python
-from tools.ccxt_rotki_symbol_map import map_symbol
+from tools.ccxt_rotki_symbol_map import add_rotki_identifier_to_balance
 
-rotki_identifier = map_symbol(ccxt_symbol)
-if rotki_identifier is None:
-    # log or skip unmapped symbol
+mapped_balance = add_rotki_identifier_to_balance(
+    balance,
+    symbol_key="asset",              # use "symbol" or "currency" if your row uses that field
+    identifier_key="asset_identifier",
+)
+if mapped_balance is None:
+    # log and skip only genuinely unknown symbols
     ...
 ```
+
+For a batch:
+
+```python
+from tools.ccxt_rotki_symbol_map import add_rotki_identifiers_to_balances
+
+mapping_result = add_rotki_identifiers_to_balances(
+    balances,
+    symbol_key="asset",
+    identifier_key="asset_identifier",
+)
+
+mapped_balances = mapping_result.mapped
+skipped_balances = mapping_result.skipped
+```
+
+Strict mode is useful for CI or local debugging because it raises immediately on an unmapped symbol:
+
+```python
+mapping_result = add_rotki_identifiers_to_balances(
+    balances,
+    symbol_key="asset",
+    identifier_key="asset_identifier",
+    strict=True,
+)
+```
+
+## Patch target in `portfolio_tracker.rotki.manual_balances`
+
+The mapping must happen before the existing code filters or logs missing rotki identifiers. The intended shape is:
+
+```python
+from tools.ccxt_rotki_symbol_map import add_rotki_identifiers_to_balances
+
+mapping_result = add_rotki_identifiers_to_balances(
+    balances,
+    symbol_key="asset",
+    identifier_key="asset_identifier",
+)
+
+for skipped in mapping_result.skipped:
+    logger.warning("Skipping balance without Rotki asset identifier mapping: %s", skipped)
+
+balances = mapping_result.mapped
+```
+
+If your importer uses another field name, adjust `symbol_key`. Common values are `asset`, `symbol`, and `currency`.
 
 This keeps the importer deterministic and prevents silently skipping balances that are known but require explicit rotki identifiers.
