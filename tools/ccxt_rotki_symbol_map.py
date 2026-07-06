@@ -14,14 +14,26 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 CCXT_TO_ROTKI_ASSET_IDS: Final[dict[str, str]] = {
+    "ALGO": "ALGO",
+    "ARB": "eip155:42161/erc20:0x912CE59144191C1204E64559FE8253a0e49E6548",
     "CHIP": "CHIP",
     "CSPR": "CSPR",
+    "DOGE": "DOGE",
+    "GALA": "eip155:1/erc20:0xd1d2Eb1B1e90B638588728b4130137D262C87cae",
     "GRAM": "GRAM",
+    "HBAR": "HBAR",
     "HYPE": "HYPE",
+    "KAS": "KAS",
+    "LINK": "eip155:1/erc20:0x514910771AF9Ca656af840dff83E8264EcF986CA",
     "MMT": "MMT",
+    "NEAR": "NEAR",
     "POL": "eip155:137/erc20:0x0000000000000000000000000000000000001010",
     "RESOLV": "RESOLV",
     "ROOT": "ROOT",
+    "SHIB": "eip155:1/erc20:0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE",
+    "SOL": "SOL",
+    "USDT": "eip155:1/erc20:0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "XRP": "XRP",
 }
 
 
