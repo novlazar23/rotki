@@ -79,12 +79,41 @@ def env_value(name: str | None) -> str | None:
     return value
 
 
+def configured_env_name(exchange_config: Mapping[str, Any], key: str) -> str | None:
+    value = exchange_config.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"Exchange config key {key!r} must be a non-empty string when set")
+    return value.strip()
+
+
+def missing_configured_env_vars(exchange_config: Mapping[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for config_key in ("api_key_env", "secret_env", "password_env"):
+        env_name = configured_env_name(exchange_config, config_key)
+        if env_name is not None and env_value(env_name) is None:
+            missing.append(env_name)
+    return missing
+
+
 def exchange_constructor_config(exchange_config: Mapping[str, Any]) -> dict[str, Any]:
     """Build the ccxt constructor config without ever storing secrets in files."""
+    missing_env_vars = missing_configured_env_vars(exchange_config)
+    if missing_env_vars:
+        exchange_id = exchange_config.get("id", "<unknown>")
+        raise ValueError(
+            f"Missing environment variables for exchange {exchange_id!r}: "
+            + ", ".join(missing_env_vars),
+        )
+
     config = dict(exchange_config.get("constructor", {}))
-    api_key = env_value(exchange_config.get("api_key_env"))
-    secret = env_value(exchange_config.get("secret_env"))
-    password = env_value(exchange_config.get("password_env"))
+    api_key_env = configured_env_name(exchange_config, "api_key_env")
+    secret_env = configured_env_name(exchange_config, "secret_env")
+    password_env = configured_env_name(exchange_config, "password_env")
+    api_key = env_value(api_key_env)
+    secret = env_value(secret_env)
+    password = env_value(password_env)
 
     if api_key is not None:
         config["apiKey"] = api_key
