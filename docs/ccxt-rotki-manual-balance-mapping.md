@@ -50,11 +50,31 @@ tools/ccxt_balance_collector.py
 
 It collects current balances via CCXT, applies the symbol mapping and writes a JSON file. It does not store secrets, mutate rotki databases or call the rotki API directly.
 
-Install the optional CCXT dependency in your local Python environment:
+### Installation on Debian/Ubuntu with PEP 668
+
+Do not install CCXT into the system Python with `python3 -m pip install ccxt`. On modern Debian/Ubuntu systems this fails with `externally-managed-environment`.
+
+Create a virtual environment instead:
 
 ```bash
-python3 -m pip install ccxt
+sudo apt update
+sudo apt install -y python3-venv python3-full
+
+cd ~/develop/rotki
+python3 -m venv .venv-ccxt
+. .venv-ccxt/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r tools/ccxt_balance_collector.requirements.txt
 ```
+
+When you open a new shell, activate the venv again before running the collector:
+
+```bash
+cd ~/develop/rotki
+. .venv-ccxt/bin/activate
+```
+
+### Configuration
 
 Create a local config from the example:
 
@@ -69,10 +89,10 @@ export BYBIT_API_KEY="..."
 export BYBIT_API_SECRET="..."
 ```
 
-Run the collector:
+Run the collector with the venv Python:
 
 ```bash
-python3 tools/ccxt_balance_collector.py \
+python tools/ccxt_balance_collector.py \
   --config ccxt-balance-collector.config.json \
   --output out/ccxt-balances.json \
   --fail-on-unmapped
