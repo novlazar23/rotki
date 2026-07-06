@@ -39,6 +39,8 @@ class CCXTExchangeProfile:
 
     exchange_id: str
     name: str
+    credential_name: str | None
+    credential_location: str | None
     options: dict[str, Any]
     symbols: list[str]
     history_params: dict[str, Any]
@@ -92,6 +94,16 @@ def int_config(config: Mapping[str, Any], key: str, default: int) -> int:
         return int(value)
     except (TypeError, ValueError) as e:
         raise ValueError(f'{key} must be an integer') from e
+
+
+def optional_str_config(config: Mapping[str, Any], key: str) -> str | None:
+    value = config.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f'{key} must be a string when set')
+    value = value.strip()
+    return value if value != '' else None
 
 
 def list_str_config(config: Mapping[str, Any], key: str, default: list[str] | tuple[str, ...] | None = None) -> list[str]:
@@ -158,6 +170,8 @@ def profile_from_config(config: Mapping[str, Any]) -> CCXTExchangeProfile:
     return CCXTExchangeProfile(
         exchange_id=exchange_id,
         name=name,
+        credential_name=optional_str_config(config, 'credential_name'),
+        credential_location=optional_str_config(config, 'credential_location'),
         options=dict_config(config, 'options'),
         symbols=symbols,
         history_params=dict_config(config, 'history_params'),
