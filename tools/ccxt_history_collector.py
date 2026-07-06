@@ -21,6 +21,8 @@ try:
 except ImportError:  # allows direct execution when copied next to the helper
     from ccxt_balance_collector import account_name, create_exchange, read_json_file, write_output  # type: ignore[no-redef]
 
+MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
+
 
 @dataclass(frozen=True)
 class CollectionError:
@@ -39,6 +41,10 @@ class HistoryResult:
 
 def utc_now_iso() -> str:
     return datetime.now(tz=UTC).replace(microsecond=0).isoformat()
+
+
+def utc_now_ms() -> int:
+    return int(datetime.now(tz=UTC).timestamp() * 1000)
 
 
 def parse_timestamp(value: Any) -> int | None:
@@ -69,6 +75,23 @@ def method_supported(exchange: Any, method_name: str) -> bool:
 def safe_timestamp(entry: Mapping[str, Any]) -> int:
     value = entry.get("timestamp")
     return int(value) if isinstance(value, int | float) else 0
+
+
+def endpoint_params(params: dict[str, Any], method_name: str) -> dict[str, Any]:
+    method_params = params.get(method_name)
+    merged = {key: value for key, value in params.items() if not isinstance(value, dict)}
+    if isinstance(method_params, dict):
+        merged.update(method_params)
+    return merged
+
+
+def windowed_params(params: dict[str, Any], *, end_ms: int | None) -> dict[str, Any]:
+    if end_ms is None:
+        return params
+    merged = dict(params)
+    merged.setdefault("endTime", end_ms)
+    merged.setdefault("end_time", end_ms)
+    return merged
 
 
 def entry_key(exchange_name: str, method: str, entry: Mapping[str, Any]) -> str:
@@ -138,6 +161,66 @@ def fetch_paginated(
     return collected
 
 
+def fetch_windowed(
+        exchange: Any,
+        method_name: str,
+        *,
+        since: int | None,
+        until: int | None,
+        limit: int,
+        max_pages: int,
+        params: dict[str, Any],
+        window_days: int,
+) -> list[dict[str, Any]]:
+    if since is None:
+        return fetch_paginated(
+            exchange,
+            method_name,
+            since=since,
+            until=until,
+            limit=limit,
+            max_pages=max_pages,
+            params=params,
+        )
+
+    final_until = until or utc_now_ms()
+    window_ms = max(window_days, 1) * MILLISECONDS_PER_DAY
+    window_start = since
+    collected: list[dict[str, Any]] = []
+
+    while window_start <= final_until:
+        window_end = min(window_start + window_ms - 1, final_until)
+        rows = fetch_paginated(
+            exchange,
+            method_name,
+            since=window_start,
+            until=window_end,
+            limit=limit,
+            max_pages=max_pages,
+            params=windowed_params(params, end_ms=window_end),
+        )
+        collected.extend(rows)
+        window_start = window_end + 1
+
+    return collected
+
+
+def add_unique_entries(
+        *,
+        exchange_name: str,
+        method_name: str,
+        rows: list[dict[str, Any]],
+        target: list[dict[str, Any]],
+        seen: set[str],
+) -> None:
+    for row in rows:
+        annotated = annotate_entry(exchange_name, method_name, row)
+        key = entry_key(exchange_name, method_name, annotated)
+        if key not in seen:
+            seen.add(key)
+            target.append(annotated)
+
+
 def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[CollectionError]]:
     name = account_name(exchange_config)
     exchange = create_exchange(exchange_config)
@@ -145,6 +228,8 @@ def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[d
     until = parse_timestamp(exchange_config.get("until"))
     limit = int(exchange_config.get("limit", 200))
     max_pages = int(exchange_config.get("max_pages", 10))
+    movement_window_days = int(exchange_config.get("movement_window_days", 7))
+    ledger_window_days = int(exchange_config.get("ledger_window_days", movement_window_days))
     params = exchange_config.get("history_params", {})
     if not isinstance(params, dict):
         raise ValueError("history_params must be an object")
@@ -174,15 +259,16 @@ def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[d
                 until=until,
                 limit=limit,
                 max_pages=max_pages,
-                params=params,
+                params=endpoint_params(params, "fetch_my_trades"),
                 symbol=symbol,
             )
-            for row in rows:
-                annotated = annotate_entry(name, "fetch_my_trades", row)
-                key = entry_key(name, "trade", annotated)
-                if key not in seen:
-                    seen.add(key)
-                    trades.append(annotated)
+            add_unique_entries(
+                exchange_name=name,
+                method_name="fetch_my_trades",
+                rows=rows,
+                target=trades,
+                seen=seen,
+            )
         except Exception as e:  # noqa: BLE001 - keep collecting other endpoints
             errors.append(CollectionError(exchange=name, method=f"fetch_my_trades:{symbol or '*'}", message=str(e)))
 
@@ -191,41 +277,45 @@ def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[d
         if not method_supported(exchange, ccxt_has_name):
             continue
         try:
-            rows = fetch_paginated(
+            rows = fetch_windowed(
                 exchange,
                 method_name,
                 since=since,
                 until=until,
                 limit=limit,
                 max_pages=max_pages,
-                params=params,
+                params=endpoint_params(params, method_name),
+                window_days=movement_window_days,
             )
-            for row in rows:
-                annotated = annotate_entry(name, method_name, row)
-                key = entry_key(name, method_name, annotated)
-                if key not in seen:
-                    seen.add(key)
-                    movements.append(annotated)
+            add_unique_entries(
+                exchange_name=name,
+                method_name=method_name,
+                rows=rows,
+                target=movements,
+                seen=seen,
+            )
         except Exception as e:  # noqa: BLE001
             errors.append(CollectionError(exchange=name, method=method_name, message=str(e)))
 
     if include_ledger and method_supported(exchange, "fetchLedger"):
         try:
-            rows = fetch_paginated(
+            rows = fetch_windowed(
                 exchange,
                 "fetch_ledger",
                 since=since,
                 until=until,
                 limit=limit,
                 max_pages=max_pages,
-                params=params,
+                params=endpoint_params(params, "fetch_ledger"),
+                window_days=ledger_window_days,
             )
-            for row in rows:
-                annotated = annotate_entry(name, "fetch_ledger", row)
-                key = entry_key(name, "fetch_ledger", annotated)
-                if key not in seen:
-                    seen.add(key)
-                    movements.append(annotated)
+            add_unique_entries(
+                exchange_name=name,
+                method_name="fetch_ledger",
+                rows=rows,
+                target=movements,
+                seen=seen,
+            )
         except Exception as e:  # noqa: BLE001
             errors.append(CollectionError(exchange=name, method="fetch_ledger", message=str(e)))
 
