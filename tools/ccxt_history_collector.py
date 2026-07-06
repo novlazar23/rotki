@@ -22,6 +22,13 @@ except ImportError:  # allows direct execution when copied next to the helper
     from ccxt_balance_collector import account_name, create_exchange, read_json_file, write_output  # type: ignore[no-redef]
 
 MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
+TRANSIENT_ERROR_MARKERS = (
+    "server timeout",
+    "retcode\":10000",
+    "retcode': 10000",
+    "request timeout",
+    "timed out",
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,11 @@ def method_supported(exchange: Any, method_name: str) -> bool:
 def safe_timestamp(entry: Mapping[str, Any]) -> int:
     value = entry.get("timestamp")
     return int(value) if isinstance(value, int | float) else 0
+
+
+def is_transient_history_error(error: Exception) -> bool:
+    message = str(error).lower().replace(" ", "")
+    return any(marker.replace(" ", "") in message for marker in TRANSIENT_ERROR_MARKERS)
 
 
 def endpoint_params(params: dict[str, Any], method_name: str) -> dict[str, Any]:
@@ -205,6 +217,44 @@ def fetch_windowed(
     return collected
 
 
+def fetch_windowed_with_timeout_retry(
+        exchange: Any,
+        method_name: str,
+        *,
+        since: int | None,
+        until: int | None,
+        limit: int,
+        max_pages: int,
+        params: dict[str, Any],
+        window_days: int,
+        fallback_window_days: int = 1,
+) -> list[dict[str, Any]]:
+    try:
+        return fetch_windowed(
+            exchange,
+            method_name,
+            since=since,
+            until=until,
+            limit=limit,
+            max_pages=max_pages,
+            params=params,
+            window_days=window_days,
+        )
+    except Exception as e:
+        if not is_transient_history_error(e) or window_days <= fallback_window_days:
+            raise
+        return fetch_windowed(
+            exchange,
+            method_name,
+            since=since,
+            until=until,
+            limit=limit,
+            max_pages=max_pages,
+            params=params,
+            window_days=fallback_window_days,
+        )
+
+
 def add_unique_entries(
         *,
         exchange_name: str,
@@ -229,7 +279,7 @@ def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[d
     limit = int(exchange_config.get("limit", 200))
     max_pages = int(exchange_config.get("max_pages", 10))
     movement_window_days = int(exchange_config.get("movement_window_days", 7))
-    ledger_window_days = int(exchange_config.get("ledger_window_days", movement_window_days))
+    ledger_window_days = int(exchange_config.get("ledger_window_days", 1))
     params = exchange_config.get("history_params", {})
     if not isinstance(params, dict):
         raise ValueError("history_params must be an object")
@@ -299,7 +349,7 @@ def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[d
 
     if include_ledger and method_supported(exchange, "fetchLedger"):
         try:
-            rows = fetch_windowed(
+            rows = fetch_windowed_with_timeout_retry(
                 exchange,
                 "fetch_ledger",
                 since=since,
@@ -308,6 +358,7 @@ def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[d
                 max_pages=max_pages,
                 params=endpoint_params(params, "fetch_ledger"),
                 window_days=ledger_window_days,
+                fallback_window_days=1,
             )
             add_unique_entries(
                 exchange_name=name,
