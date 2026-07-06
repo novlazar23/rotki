@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
-from rotkehlchen.exchanges.ccxt_integration import expand_profiles
+from rotkehlchen.exchanges.ccxt_integration import CCXTExchangeProfile, expand_profiles
+from rotkehlchen.types import Location
 
 if TYPE_CHECKING:
     from rotkehlchen.rotkehlchen import Rotkehlchen
 
 CCXT_FRONTEND_SETTINGS_KEY = 'ccxt_exchange_profiles'
+
+
+@dataclass(frozen=True)
+class CCXTRotkiCredentials:
+    key: str
+    secret: str | None
+    passphrase: str | None
 
 
 class CCXTService:
@@ -23,6 +32,50 @@ class CCXTService:
             'profile': profile,
             'expanded_profiles': [entry.serialize() for entry in profiles],
         }
+
+    @staticmethod
+    def _credential_location_from_profile(profile: CCXTExchangeProfile) -> Location:
+        location_value = profile.credential_location or profile.exchange_id
+        normalized = location_value.replace('-', '').replace('_', '').lower()
+        if normalized == 'bybit':
+            return Location.BYBIT
+        if normalized == 'binance':
+            return Location.BINANCE
+        if normalized == 'okx':
+            return Location.OKX
+        if normalized == 'kucoin':
+            return Location.KUCOIN
+        if normalized == 'gate':
+            return Location.GATE
+        raise ValueError(f'Unsupported CCXT credential location {location_value!r}')
+
+    @staticmethod
+    def _string_or_none(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            return value.decode()
+        return str(value)
+
+    def resolve_profile_credentials(self, profile: CCXTExchangeProfile) -> CCXTRotkiCredentials:
+        credential_name = profile.credential_name or profile.name.rsplit('-', 1)[0]
+        location = self._credential_location_from_profile(profile)
+        with self.rotkehlchen.data.db.conn.read_ctx() as cursor:
+            row = cursor.execute(
+                'SELECT api_key, api_secret, passphrase FROM user_credentials WHERE name=? AND location=?;',
+                (credential_name, location.serialize_for_db()),
+            ).fetchone()
+
+        if row is None:
+            raise ValueError(
+                f'No stored rotki credentials found for {credential_name!r} at {location.serialize()!r}',
+            )
+
+        return CCXTRotkiCredentials(
+            key=str(row[0]),
+            secret=self._string_or_none(row[1]),
+            passphrase=self._string_or_none(row[2]),
+        )
 
     def _load_frontend_settings(self) -> dict[str, Any]:
         with self.rotkehlchen.data.db.conn.read_ctx() as cursor:
