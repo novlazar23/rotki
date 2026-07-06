@@ -32,16 +32,19 @@ class CCXTHistoryResult:
     trades: list[dict[str, Any]]
     movements: list[dict[str, Any]]
     errors: list[CCXTQueryError]
+    discovered_symbols: dict[str, list[str]]
 
     def serialize(self) -> dict[str, Any]:
         return {
             'trades': self.trades,
             'movements': self.movements,
             'errors': [asdict(error) for error in self.errors],
+            'discovered_symbols': self.discovered_symbols,
             'summary': {
                 'trades': len(self.trades),
                 'movements': len(self.movements),
                 'errors': len(self.errors),
+                'discovered_symbols': sum(len(symbols) for symbols in self.discovered_symbols.values()),
             },
         }
 
@@ -102,6 +105,45 @@ def _windowed_params(params: dict[str, Any], end_ms: int | None) -> dict[str, An
     result.setdefault('endTime', end_ms)
     result.setdefault('end_time', end_ms)
     return result
+
+
+def _market_type_matches(market: Mapping[str, Any], requested_types: list[str]) -> bool:
+    if len(requested_types) == 0:
+        return True
+    market_type = str(market.get('type', '')).lower()
+    requested = {entry.lower() for entry in requested_types}
+    if market_type in requested:
+        return True
+    return any(bool(market.get(entry)) for entry in requested)
+
+
+def discover_profile_symbols(exchange: Any, profile: CCXTExchangeProfile) -> list[str]:
+    """Discover symbols from CCXT markets for a profile.
+
+    Explicit symbols always win. Discovery is only active when the profile has
+    auto_discover_symbols enabled and no explicit symbols were configured.
+    """
+    if len(profile.symbols) != 0 or profile.auto_discover_symbols is False:
+        return profile.symbols
+
+    markets = exchange.load_markets()
+    quote_assets = {asset.upper() for asset in profile.quote_assets}
+    symbols: list[str] = []
+    for symbol, market in markets.items():
+        if not isinstance(symbol, str) or not isinstance(market, Mapping):
+            continue
+        quote = str(market.get('quote', '')).upper()
+        if quote not in quote_assets:
+            continue
+        if _market_type_matches(market, profile.market_types) is False:
+            continue
+        if market.get('active') is False:
+            continue
+        symbols.append(symbol)
+        if len(symbols) >= profile.max_auto_symbols:
+            break
+
+    return sorted(set(symbols))
 
 
 def _fetch_paginated(
@@ -191,9 +233,18 @@ def query_ccxt_profile_history(
     trades: list[dict[str, Any]] = []
     movements: list[dict[str, Any]] = []
     errors: list[CCXTQueryError] = []
+    discovered_symbols: dict[str, list[str]] = {}
 
     if profile.collect_trades:
-        for symbol in profile.symbols:
+        try:
+            symbols = discover_profile_symbols(exchange, profile)
+            if profile.auto_discover_symbols and len(profile.symbols) == 0:
+                discovered_symbols[profile.name] = symbols
+        except Exception as e:  # noqa: BLE001
+            symbols = profile.symbols
+            errors.append(CCXTQueryError(profile=profile.name, method='discover_symbols', message=str(e)))
+
+        for symbol in symbols:
             try:
                 rows = _fetch_paginated(
                     exchange,
@@ -262,4 +313,5 @@ def query_ccxt_profile_history(
         trades=deduplicate_history_entries(trades),
         movements=deduplicate_history_entries(movements),
         errors=errors,
+        discovered_symbols=discovered_symbols,
     )
