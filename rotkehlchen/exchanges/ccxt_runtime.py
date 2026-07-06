@@ -8,11 +8,11 @@ from typing import Any
 
 from rotkehlchen.exchanges.ccxt_integration import (
     CCXTExchangeProfile,
+    TimestampMS,
     deduplicate_history_entries,
     is_transient_ccxt_history_error,
     windowed_history_ranges,
 )
-from rotkehlchen.types import TimestampMS
 
 try:
     import ccxt  # type: ignore[import-untyped]
