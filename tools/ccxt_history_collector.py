@@ -84,6 +84,15 @@ def safe_timestamp(entry: Mapping[str, Any]) -> int:
     return int(value) if isinstance(value, int | float) else 0
 
 
+def bool_config(config: Mapping[str, Any], key: str, default: bool) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def is_transient_history_error(error: Exception) -> bool:
     message = str(error).lower().replace(" ", "")
     return any(marker.replace(" ", "") in message for marker in TRANSIENT_ERROR_MARKERS)
@@ -158,6 +167,34 @@ def entry_key(exchange_name: str, method: str, entry: Mapping[str, Any]) -> str:
         "amount": entry.get("amount"),
         "type": entry.get("type"),
     }, sort_keys=True, default=str)
+
+
+def global_entry_key(entry: Mapping[str, Any]) -> str:
+    return json.dumps({
+        "source_method": entry.get("source_method"),
+        "id": entry.get("id"),
+        "timestamp": entry.get("timestamp"),
+        "datetime": entry.get("datetime"),
+        "symbol": entry.get("symbol"),
+        "currency": entry.get("currency"),
+        "amount": entry.get("amount"),
+        "side": entry.get("side"),
+        "type": entry.get("type"),
+        "txid": entry.get("txid"),
+        "address": entry.get("address"),
+    }, sort_keys=True, default=str)
+
+
+def deduplicate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduplicated: list[dict[str, Any]] = []
+    for entry in entries:
+        key = global_entry_key(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(entry)
+    return deduplicated
 
 
 def annotate_entry(exchange_name: str, method: str, entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -331,62 +368,66 @@ def collect_exchange_history(exchange_config: Mapping[str, Any]) -> tuple[list[d
     else:
         raise ValueError("symbols must be a list of strings when set")
 
-    include_ledger = bool(exchange_config.get("include_ledger", True))
+    collect_trades = bool_config(exchange_config, "collect_trades", True)
+    collect_movements = bool_config(exchange_config, "collect_movements", True)
+    collect_ledger = bool_config(exchange_config, "collect_ledger", bool_config(exchange_config, "include_ledger", True))
     trades: list[dict[str, Any]] = []
     movements: list[dict[str, Any]] = []
     errors: list[CollectionError] = []
     seen: set[str] = set()
 
-    for symbol in symbols_to_query:
-        if not method_supported(exchange, "fetchMyTrades"):
-            continue
-        try:
-            rows = fetch_paginated(
-                exchange,
-                "fetch_my_trades",
-                since=since,
-                until=until,
-                limit=limit,
-                max_pages=max_pages,
-                params=endpoint_params(params, "fetch_my_trades"),
-                symbol=symbol,
-            )
-            add_unique_entries(
-                exchange_name=name,
-                method_name="fetch_my_trades",
-                rows=rows,
-                target=trades,
-                seen=seen,
-            )
-        except Exception as e:  # noqa: BLE001 - keep collecting other endpoints
-            errors.append(CollectionError(exchange=name, method=f"fetch_my_trades:{symbol or '*'}", message=str(e)))
+    if collect_trades:
+        for symbol in symbols_to_query:
+            if not method_supported(exchange, "fetchMyTrades"):
+                continue
+            try:
+                rows = fetch_paginated(
+                    exchange,
+                    "fetch_my_trades",
+                    since=since,
+                    until=until,
+                    limit=limit,
+                    max_pages=max_pages,
+                    params=endpoint_params(params, "fetch_my_trades"),
+                    symbol=symbol,
+                )
+                add_unique_entries(
+                    exchange_name=name,
+                    method_name="fetch_my_trades",
+                    rows=rows,
+                    target=trades,
+                    seen=seen,
+                )
+            except Exception as e:  # noqa: BLE001 - keep collecting other endpoints
+                errors.append(CollectionError(exchange=name, method=f"fetch_my_trades:{symbol or '*'}", message=str(e)))
 
-    for method_name in ("fetch_deposits", "fetch_withdrawals"):
-        ccxt_has_name = "fetchDeposits" if method_name == "fetch_deposits" else "fetchWithdrawals"
-        if not method_supported(exchange, ccxt_has_name):
-            continue
-        try:
-            rows = fetch_windowed(
-                exchange,
-                method_name,
-                since=since,
-                until=until,
-                limit=limit,
-                max_pages=max_pages,
-                params=endpoint_params(params, method_name),
-                window_days=movement_window_days,
-            )
-            add_unique_entries(
-                exchange_name=name,
-                method_name=method_name,
-                rows=rows,
-                target=movements,
-                seen=seen,
-            )
-        except Exception as e:  # noqa: BLE001
-            errors.append(CollectionError(exchange=name, method=method_name, message=str(e)))
+    if collect_movements:
+        for method_name in ("fetch_deposits", "fetch_withdrawals"):
+            ccxt_has_name = "fetchDeposits" if method_name == "fetch_deposits" else "fetchWithdrawals"
+            if not method_supported(exchange, ccxt_has_name):
+                continue
+            try:
+                rows = fetch_windowed(
+                    exchange,
+                    method_name,
+                    since=since,
+                    until=until,
+                    limit=limit,
+                    max_pages=max_pages,
+                    params=endpoint_params(params, method_name),
+                    window_days=movement_window_days,
+                )
+                add_unique_entries(
+                    exchange_name=name,
+                    method_name=method_name,
+                    rows=rows,
+                    target=movements,
+                    seen=seen,
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append(CollectionError(exchange=name, method=method_name, message=str(e)))
 
-    if include_ledger and method_supported(exchange, "fetchLedger"):
+    if collect_ledger and method_supported(exchange, "fetchLedger"):
         try:
             rows = fetch_windowed_with_timeout_retry(
                 exchange,
@@ -432,8 +473,8 @@ def collect_history(config: Mapping[str, Any]) -> dict[str, Any]:
 
     result = HistoryResult(
         collected_at=utc_now_iso(),
-        trades=sorted(all_trades, key=safe_timestamp),
-        movements=sorted(all_movements, key=safe_timestamp),
+        trades=sorted(deduplicate_entries(all_trades), key=safe_timestamp),
+        movements=sorted(deduplicate_entries(all_movements), key=safe_timestamp),
         errors=all_errors,
     )
     return {
