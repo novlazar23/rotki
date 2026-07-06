@@ -62,11 +62,12 @@ def decimal_from_value(value: Any) -> Decimal:
         raise ValueError(f"Can not convert balance value {value!r} to Decimal") from e
 
 
-def read_json_file(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
+def read_json_file(path: Path | str) -> dict[str, Any]:
+    json_path = Path(path)
+    with json_path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
-        raise ValueError(f"Config file {path} must contain a JSON object")
+        raise ValueError(f"Config file {json_path} must contain a JSON object")
     return data
 
 
@@ -121,16 +122,16 @@ def exchange_constructor_config(exchange_config: Mapping[str, Any]) -> dict[str,
         config["secret"] = secret
     if password is not None:
         config["password"] = password
+    config["enableRateLimit"] = True
 
-    options = exchange_config.get("options")
-    if isinstance(options, dict):
-        config.setdefault("options", {}).update(options)
+    constructor_options = exchange_config.get("options")
+    if constructor_options is not None:
+        config["options"] = constructor_options
 
     urls = exchange_config.get("urls")
-    if isinstance(urls, dict):
+    if urls is not None:
         config["urls"] = urls
 
-    config.setdefault("enableRateLimit", True)
     return config
 
 
@@ -139,49 +140,51 @@ def create_exchange(exchange_config: Mapping[str, Any]) -> Any:
         raise RuntimeError("Missing optional dependency ccxt. Install it with: pip install ccxt")
 
     exchange_id = exchange_config.get("id")
-    if not isinstance(exchange_id, str) or exchange_id == "":
-        raise ValueError("Each exchange config needs a non-empty 'id', e.g. 'bybit'")
-
-    try:
-        exchange_class = getattr(ccxt, exchange_id)
-    except AttributeError as e:
-        raise ValueError(f"ccxt has no exchange class {exchange_id!r}") from e
+    if not isinstance(exchange_id, str) or not exchange_id:
+        raise ValueError("Each exchange config needs a non-empty string id, for example 'bybit'")
+    exchange_class = getattr(ccxt, exchange_id, None)
+    if exchange_class is None:
+        raise ValueError(f"ccxt does not provide an exchange named {exchange_id!r}")
 
     exchange = exchange_class(exchange_constructor_config(exchange_config))
-    if exchange_config.get("sandbox") is True:
-        exchange.set_sandbox_mode(True)
+    sandbox = exchange_config.get("sandbox")
+    if sandbox is not None:
+        exchange.set_sandbox_mode(bool(sandbox))
     return exchange
 
 
 def account_name(exchange_config: Mapping[str, Any]) -> str:
-    configured_name = exchange_config.get("name")
+    name = exchange_config.get("name")
+    if isinstance(name, str) and name:
+        return name
     exchange_id = exchange_config.get("id")
-    return str(configured_name or exchange_id)
+    if isinstance(exchange_id, str) and exchange_id:
+        return exchange_id
+    return "exchange"
 
 
-def should_keep_balance(total: Decimal, min_total: Decimal, include_zero: bool) -> bool:
-    if include_zero:
-        return True
-    return total.copy_abs() > min_total
+def should_keep_balance(total: Decimal, *, min_total: Decimal, include_zero: bool) -> bool:
+    if total == 0 and not include_zero:
+        return False
+    return abs(total) >= min_total
 
 
 def normalize_balance_rows(
-        exchange_name: str,
-        raw_balance: Mapping[str, Any],
         *,
+        exchange_name: str,
+        account: str,
+        raw_balance: Mapping[str, Any],
+        timestamp: str,
         min_total: Decimal,
         include_zero: bool,
-        timestamp: str,
-) -> tuple[list[CollectedBalance], int, set[str]]:
-    """Normalize ccxt fetch_balance() output to flat rows."""
-    rows: list[CollectedBalance] = []
+) -> tuple[list[CollectedBalance], int, list[str]]:
+    meta_keys = {"free", "used", "total", "info", "timestamp", "datetime"}
+    balances: list[CollectedBalance] = []
     skipped_zero = 0
-    unmapped_symbols: set[str] = set()
+    unmapped_symbols: list[str] = []
 
     for symbol, value in raw_balance.items():
-        if symbol in {"free", "used", "total", "info", "timestamp", "datetime"}:
-            continue
-        if not isinstance(value, Mapping):
+        if symbol in meta_keys or not isinstance(value, Mapping):
             continue
 
         free = decimal_from_value(value.get("free"))
@@ -190,18 +193,18 @@ def normalize_balance_rows(
         if total == 0 and (free != 0 or used != 0):
             total = free + used
 
-        if not should_keep_balance(total=total, min_total=min_total, include_zero=include_zero):
+        if not should_keep_balance(total, min_total=min_total, include_zero=include_zero):
             skipped_zero += 1
             continue
 
-        asset_identifier = map_symbol(symbol)
+        asset_identifier = map_symbol(str(symbol))
         if asset_identifier is None:
-            unmapped_symbols.add(symbol.upper())
+            unmapped_symbols.append(str(symbol))
 
-        rows.append(CollectedBalance(
+        balances.append(CollectedBalance(
             exchange=exchange_name,
-            account=exchange_name,
-            symbol=symbol.upper(),
+            account=account,
+            symbol=str(symbol),
             asset_identifier=asset_identifier,
             free=str(free),
             used=str(used),
@@ -209,43 +212,44 @@ def normalize_balance_rows(
             timestamp=timestamp,
         ))
 
-    return rows, skipped_zero, unmapped_symbols
+    return balances, skipped_zero, sorted(set(unmapped_symbols))
 
 
 def collect_balances(config: Mapping[str, Any]) -> CollectorResult:
     exchanges = config.get("exchanges")
     if not isinstance(exchanges, list) or len(exchanges) == 0:
-        raise ValueError("Config needs a non-empty 'exchanges' list")
+        raise ValueError("Config needs a non-empty exchanges list")
 
     min_total = decimal_from_value(config.get("min_total", "0"))
     include_zero = bool(config.get("include_zero", False))
     timestamp = utc_now_iso()
-    collected: list[CollectedBalance] = []
-    skipped_zero_balances = 0
-    unmapped_symbols: set[str] = set()
+
+    all_balances: list[CollectedBalance] = []
+    total_skipped_zero = 0
+    all_unmapped_symbols: list[str] = []
 
     for exchange_config in exchanges:
         if not isinstance(exchange_config, Mapping):
-            raise ValueError("Each entry in 'exchanges' must be an object")
-
-        name = account_name(exchange_config)
+            raise ValueError("Each exchange config must be an object")
+        exchange_name = account_name(exchange_config)
         exchange = create_exchange(exchange_config)
         raw_balance = exchange.fetch_balance()
-        rows, skipped_zero, exchange_unmapped = normalize_balance_rows(
-            exchange_name=name,
+        balances, skipped_zero, unmapped_symbols = normalize_balance_rows(
+            exchange_name=exchange_name,
+            account=account_name(exchange_config),
             raw_balance=raw_balance,
+            timestamp=timestamp,
             min_total=min_total,
             include_zero=include_zero,
-            timestamp=timestamp,
         )
-        collected.extend(rows)
-        skipped_zero_balances += skipped_zero
-        unmapped_symbols.update(exchange_unmapped)
+        all_balances.extend(balances)
+        total_skipped_zero += skipped_zero
+        all_unmapped_symbols.extend(unmapped_symbols)
 
     return CollectorResult(
-        balances=collected,
-        skipped_zero_balances=skipped_zero_balances,
-        unmapped_symbols=sorted(unmapped_symbols),
+        balances=all_balances,
+        skipped_zero_balances=total_skipped_zero,
+        unmapped_symbols=sorted(set(all_unmapped_symbols)),
     )
 
 
@@ -261,24 +265,19 @@ def result_to_jsonable(result: CollectorResult) -> dict[str, Any]:
 
 
 def write_output(output_path: Path | None, data: dict[str, Any]) -> None:
-    payload = json.dumps(data, indent=2, sort_keys=True)
+    text = json.dumps(data, indent=2, sort_keys=True)
     if output_path is None:
-        print(payload)
+        print(text)
         return
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(payload + "\n", encoding="utf-8")
+    output_path.write_text(text + "\n", encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Collect CCXT balances and map them to rotki assets.")
-    parser.add_argument("--config", required=True, type=Path, help="Path to collector config JSON")
-    parser.add_argument("--output", type=Path, help="Optional output JSON path. Defaults to stdout.")
-    parser.add_argument(
-        "--fail-on-unmapped",
-        action="store_true",
-        help="Return a non-zero exit code if any collected balance has no rotki asset mapping.",
-    )
+    parser = argparse.ArgumentParser(description="Collect CCXT balances and map them to rotki identifiers.")
+    parser.add_argument("--config", required=True, type=Path, help="Collector config JSON")
+    parser.add_argument("--output", type=Path, help="Output JSON path. Defaults to stdout.")
+    parser.add_argument("--fail-on-unmapped", action="store_true", help="Return non-zero if any balance symbol can not be mapped")
     return parser.parse_args()
 
 
@@ -287,18 +286,15 @@ def main() -> int:
     try:
         config = read_json_file(args.config)
         result = collect_balances(config)
-        write_output(args.output, result_to_jsonable(result))
-    except Exception as e:  # noqa: BLE001 - CLI must print concise diagnostics
+        data = result_to_jsonable(result)
+        write_output(args.output, data)
+    except Exception as e:  # noqa: BLE001 - CLI diagnostics
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
     if args.fail_on_unmapped and result.unmapped_symbols:
-        print(
-            "ERROR: Unmapped symbols: " + ", ".join(result.unmapped_symbols),
-            file=sys.stderr,
-        )
+        print("ERROR: Unmapped symbols: " + ", ".join(result.unmapped_symbols), file=sys.stderr)
         return 1
-
     return 0
 
 
