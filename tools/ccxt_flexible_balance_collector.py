@@ -25,7 +25,6 @@ from typing import Any
 try:
     from tools.ccxt_balance_collector import (
         account_name,
-        bool_config,
         create_exchange,
         decimal_from_value,
         read_json_file,
@@ -37,7 +36,6 @@ try:
 except ImportError:  # allows direct execution when copied next to the helpers
     from ccxt_balance_collector import (  # type: ignore[no-redef]
         account_name,
-        bool_config,
         create_exchange,
         decimal_from_value,
         read_json_file,
@@ -67,6 +65,15 @@ class FlexibleCollectorResult:
     skipped_zero_balances: int
     unmapped_symbols: list[str]
     auto_mapped_symbols: list[str]
+
+
+def bool_config(config: Mapping[str, Any], key: str, default: bool = False) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 def config_asset_mappings(config: Mapping[str, Any]) -> dict[str, str]:
