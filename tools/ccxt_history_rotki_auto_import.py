@@ -249,6 +249,35 @@ def import_with_corrections(
     return attempts, skip_assets, skipped_report
 
 
+def summarized_history_errors(history_data: dict[str, Any], *, limit: int = 10) -> list[dict[str, str]]:
+    errors = history_data.get("errors", [])
+    if not isinstance(errors, list):
+        return []
+    result: list[dict[str, str]] = []
+    for error in errors[:limit]:
+        if not isinstance(error, dict):
+            continue
+        result.append({
+            "exchange": str(error.get("exchange", "")),
+            "method": str(error.get("method", "")),
+            "message": str(error.get("message", "")),
+        })
+    return result
+
+
+def print_pipeline_summary(report: dict[str, Any]) -> None:
+    print(json.dumps(report["history_summary"], indent=2, sort_keys=True))
+    history_errors = report.get("history_errors", [])
+    if history_errors:
+        print("CCXT history errors:", file=sys.stderr)
+        for error in history_errors:
+            print(
+                f"- {error['exchange']} {error['method']}: {error['message']}",
+                file=sys.stderr,
+            )
+    print(f"Report: {report['files']['report_json']}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect, convert and import CCXT history into rotki.")
     parser.add_argument("--config", required=True, type=Path, help="CCXT history collector config JSON")
@@ -315,14 +344,14 @@ def main() -> int:
             "mode": "apply" if args.apply else "dry_run",
             "files": {key: str(value) for key, value in asdict(files).items()},
             "history_summary": history_data.get("summary", {}),
+            "history_errors": summarized_history_errors(history_data),
             "conversion_summary": skipped_report.get("summary", {}),
             "final_skip_assets": sorted(skip_assets),
             "import_attempts": [asdict(attempt) for attempt in attempts],
             "success": all(attempt.success for attempt in attempts) if attempts else True,
         }
         write_json(files.report_json, report)
-        print(json.dumps(report["history_summary"], indent=2, sort_keys=True))
-        print(f"Report: {files.report_json}")
+        print_pipeline_summary(report)
         if report["success"] is False:
             return 1
     except Exception as e:  # noqa: BLE001 - CLI diagnostics
