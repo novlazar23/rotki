@@ -9,7 +9,7 @@ from rotkehlchen.exchanges.ccxt_integration import expand_profiles
 if TYPE_CHECKING:
     from rotkehlchen.rotkehlchen import Rotkehlchen
 
-CCXT_PROFILES_SETTINGS_KEY = 'ccxt_exchange_profiles'
+CCXT_FRONTEND_SETTINGS_KEY = 'ccxt_exchange_profiles'
 
 
 class CCXTService:
@@ -24,22 +24,39 @@ class CCXTService:
             'expanded_profiles': [entry.serialize() for entry in profiles],
         }
 
-    def get_profiles(self) -> dict[str, Any]:
+    def _load_frontend_settings(self) -> dict[str, Any]:
         with self.rotkehlchen.data.db.conn.read_ctx() as cursor:
             row = cursor.execute(
                 'SELECT value FROM settings WHERE name=?;',
-                (CCXT_PROFILES_SETTINGS_KEY,),
+                ('frontend_settings',),
             ).fetchone()
 
-        if row is None:
-            profiles: list[dict[str, Any]] = []
-        else:
-            try:
-                loaded = json.loads(row[0])
-            except json.JSONDecodeError:
-                loaded = []
-            profiles = loaded if isinstance(loaded, list) else []
+        if row is None or row[0] in (None, ''):
+            return {}
+        try:
+            data = json.loads(row[0])
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
+    def _save_frontend_settings(self, data: dict[str, Any]) -> None:
+        with self.rotkehlchen.data.db.user_write() as write_cursor:
+            write_cursor.execute(
+                'INSERT OR REPLACE INTO settings(name, value) VALUES(?, ?);',
+                ('frontend_settings', json.dumps(data, sort_keys=True)),
+            )
+
+    def _load_profiles(self) -> list[dict[str, Any]]:
+        profiles = self._load_frontend_settings().get(CCXT_FRONTEND_SETTINGS_KEY, [])
+        return profiles if isinstance(profiles, list) else []
+
+    def _save_profiles(self, profiles: list[dict[str, Any]]) -> None:
+        frontend_settings = self._load_frontend_settings()
+        frontend_settings[CCXT_FRONTEND_SETTINGS_KEY] = profiles
+        self._save_frontend_settings(frontend_settings)
+
+    def get_profiles(self) -> dict[str, Any]:
+        profiles = self._load_profiles()
         return {
             'result': {
                 'profiles': profiles,
@@ -67,21 +84,16 @@ class CCXTService:
                 'status_code': HTTPStatus.BAD_REQUEST,
             }
 
-        current = self.get_profiles()['result']['profiles']
+        current = self._load_profiles()
         updated = [entry for entry in current if entry.get('name') != name]
         updated.append(profile)
         updated.sort(key=lambda entry: str(entry.get('name', '')))
-
-        with self.rotkehlchen.data.db.user_write() as write_cursor:
-            write_cursor.execute(
-                'INSERT OR REPLACE INTO settings(name, value) VALUES(?, ?);',
-                (CCXT_PROFILES_SETTINGS_KEY, json.dumps(updated, sort_keys=True)),
-            )
+        self._save_profiles(updated)
 
         return {'result': validated, 'message': '', 'status_code': HTTPStatus.OK}
 
     def delete_profile(self, name: str) -> dict[str, Any]:
-        current = self.get_profiles()['result']['profiles']
+        current = self._load_profiles()
         updated = [entry for entry in current if entry.get('name') != name]
         if len(updated) == len(current):
             return {
@@ -90,10 +102,5 @@ class CCXTService:
                 'status_code': HTTPStatus.NOT_FOUND,
             }
 
-        with self.rotkehlchen.data.db.user_write() as write_cursor:
-            write_cursor.execute(
-                'INSERT OR REPLACE INTO settings(name, value) VALUES(?, ?);',
-                (CCXT_PROFILES_SETTINGS_KEY, json.dumps(updated, sort_keys=True)),
-            )
-
+        self._save_profiles(updated)
         return {'result': True, 'message': '', 'status_code': HTTPStatus.OK}
