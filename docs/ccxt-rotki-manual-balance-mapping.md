@@ -40,6 +40,68 @@ Return JSON for use by another script:
 python tools/ccxt_rotki_symbol_map.py --json
 ```
 
+## Balance collector
+
+The collector file is:
+
+```text
+tools/ccxt_balance_collector.py
+```
+
+It collects current balances via CCXT, applies the symbol mapping and writes a JSON file. It does not store secrets, mutate rotki databases or call the rotki API directly.
+
+Install the optional CCXT dependency in your local Python environment:
+
+```bash
+python3 -m pip install ccxt
+```
+
+Create a local config from the example:
+
+```bash
+cp docs/examples/ccxt-balance-collector.config.example.json ccxt-balance-collector.config.json
+```
+
+Set API credentials through environment variables. Do not put keys into Git:
+
+```bash
+export BYBIT_API_KEY="..."
+export BYBIT_API_SECRET="..."
+```
+
+Run the collector:
+
+```bash
+python3 tools/ccxt_balance_collector.py \
+  --config ccxt-balance-collector.config.json \
+  --output out/ccxt-balances.json \
+  --fail-on-unmapped
+```
+
+The output JSON has this shape:
+
+```json
+{
+  "balances": [
+    {
+      "exchange": "bybit-main",
+      "account": "bybit-main",
+      "symbol": "POL",
+      "asset_identifier": "eip155:137/erc20:0x0000000000000000000000000000000000001010",
+      "free": "1.23",
+      "used": "0",
+      "total": "1.23",
+      "timestamp": "2026-07-06T00:00:00+00:00"
+    }
+  ],
+  "summary": {
+    "balances": 1,
+    "skipped_zero_balances": 0,
+    "unmapped_symbols": []
+  }
+}
+```
+
 ## Initial mappings
 
 | Exchange/CCXT symbol | rotki identifier |
