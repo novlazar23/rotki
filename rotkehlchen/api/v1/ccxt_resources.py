@@ -17,6 +17,14 @@ class CCXTProfileSchema(Schema):
     profile = fields.Dict(required=True)
 
 
+class CCXTProfileRunSchema(Schema):
+    name = fields.String(required=True)
+    start_ms = fields.Integer(required=True)
+    end_ms = fields.Integer(required=False, load_default=None, allow_none=True)
+    limit = fields.Integer(required=False, load_default=200)
+    max_pages = fields.Integer(required=False, load_default=10)
+
+
 class CCXTProfileDeleteSchema(Schema):
     name = fields.String(required=True)
 
@@ -24,6 +32,7 @@ class CCXTProfileDeleteSchema(Schema):
 class CCXTProfilesResource(BaseMethodView):
     put_schema = CCXTProfileSchema()
     patch_schema = CCXTProfileSchema()
+    post_schema = CCXTProfileRunSchema()
     delete_schema = CCXTProfileDeleteSchema()
 
     @require_loggedin_user()
@@ -41,6 +50,25 @@ class CCXTProfilesResource(BaseMethodView):
     @use_kwargs(patch_schema, location='json')
     def patch(self, profile: dict[str, Any]) -> Response:
         result = CCXTService(self.rest_api.rotkehlchen).upsert_profile(profile=profile)
+        return api_response(result, status_code=result.get('status_code', HTTPStatus.OK))
+
+    @require_loggedin_user()
+    @use_kwargs(post_schema, location='json')
+    def post(
+            self,
+            name: str,
+            start_ms: int,
+            end_ms: int | None,
+            limit: int,
+            max_pages: int,
+    ) -> Response:
+        result = CCXTService(self.rest_api.rotkehlchen).preview_stored_profile_history(
+            name=name,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit,
+            max_pages=max_pages,
+        )
         return api_response(result, status_code=result.get('status_code', HTTPStatus.OK))
 
     @require_loggedin_user()
