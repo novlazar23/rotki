@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import re
 import sys
+import uuid
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -78,35 +82,76 @@ def extract_unknown_assets_from_text(text: str) -> list[str]:
     return sorted(set(UNKNOWN_ASSET_PATTERN.findall(text)))
 
 
-def extract_unknown_assets_from_response(response: dict[str, Any]) -> list[str]:
-    candidates = [json.dumps(response, sort_keys=True, default=str)]
-    message = response.get("message")
-    if isinstance(message, str):
-        candidates.append(message)
-        try:
-            candidates.append(json.dumps(json.loads(message), sort_keys=True))
-        except json.JSONDecodeError:
-            pass
-    unknown: set[str] = set()
-    for candidate in candidates:
-        unknown.update(extract_unknown_assets_from_text(candidate))
-    return sorted(unknown)
+def encode_multipart_formdata(
+        fields: dict[str, str],
+        *,
+        file_field: str,
+        file_path: Path,
+) -> tuple[bytes, str]:
+    boundary = f"----rotki-ccxt-{uuid.uuid4().hex}"
+    body_parts: list[bytes] = []
+
+    for name, value in fields.items():
+        body_parts.extend([
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+            str(value).encode(),
+            b"\r\n",
+        ])
+
+    filename = file_path.name
+    content_type = mimetypes.guess_type(filename)[0] or "text/csv"
+    body_parts.extend([
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode(),
+        f"Content-Type: {content_type}\r\n\r\n".encode(),
+        file_path.read_bytes(),
+        b"\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ])
+    return b"".join(body_parts), boundary
 
 
-def import_csv(client: RotkiAPIClient, *, source: str, csv_path: Path) -> dict[str, Any]:
-    response = client.request(
-        "PUT",
-        "/import",
+def post_csv_import(client: RotkiAPIClient, *, source: str, csv_path: Path) -> dict[str, Any]:
+    body, boundary = encode_multipart_formdata(
         {
-            "async_query": False,
+            "async_query": "false",
             "source": source,
-            "file": str(csv_path.resolve()),
         },
+        file_field="file",
+        file_path=csv_path,
     )
-    result = extract_result(response)
+    request = urllib.request.Request(
+        url=client.base_url + "/import",
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with client.opener.open(request, timeout=client.timeout) as response:
+            response_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RotkiAPIError(
+            f"rotki API POST /import failed with HTTP {e.code}: {error_body}",
+            status_code=e.code,
+            body=error_body,
+        ) from e
+    except urllib.error.URLError as e:
+        raise RotkiAPIError(f"rotki API POST /import failed: {e.reason}") from e
+
+    if response_body == "":
+        return {}
+    data = json.loads(response_body)
+    if not isinstance(data, dict):
+        raise RuntimeError("rotki API POST /import returned non-object JSON")
+    result = extract_result(data)
     if result is False:
-        raise RuntimeError(json.dumps(response, sort_keys=True))
-    return response
+        raise RuntimeError(json.dumps(data, sort_keys=True))
+    return data
 
 
 def regenerate_csvs(
@@ -153,7 +198,7 @@ def import_with_corrections(
     for attempt_number in range(1, max_corrections + 2):
         csv_path = csv_path_getter(files)
         try:
-            response = import_csv(client, source=source, csv_path=csv_path)
+            response = post_csv_import(client, source=source, csv_path=csv_path)
             attempts.append(ImportAttempt(
                 source=source,
                 csv_path=str(csv_path),
