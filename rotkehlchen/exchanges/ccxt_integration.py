@@ -24,6 +24,7 @@ TRANSIENT_CCXT_ERROR_MARKERS = (
     'request timeout',
     'timed out',
 )
+DEFAULT_DISCOVERY_QUOTE_ASSETS = ('USDT', 'USDC')
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,10 @@ class CCXTExchangeProfile:
     collect_ledger: bool
     movement_window_days: int
     ledger_window_days: int
+    auto_discover_symbols: bool
+    quote_assets: list[str]
+    market_types: list[str]
+    max_auto_symbols: int
 
     def serialize(self) -> dict[str, Any]:
         return asdict(self)
@@ -89,8 +94,8 @@ def int_config(config: Mapping[str, Any], key: str, default: int) -> int:
         raise ValueError(f'{key} must be an integer') from e
 
 
-def list_str_config(config: Mapping[str, Any], key: str, default: list[str] | None = None) -> list[str]:
-    value = config.get(key, default or [])
+def list_str_config(config: Mapping[str, Any], key: str, default: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    value = config.get(key, list(default or []))
     if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
         raise ValueError(f'{key} must be a list of strings')
     return value
@@ -143,17 +148,28 @@ def profile_from_config(config: Mapping[str, Any]) -> CCXTExchangeProfile:
     if not isinstance(name, str) or name == '':
         name = exchange_id
 
+    symbols = list_str_config(config, 'symbols')
+    auto_discover_symbols = bool_config(
+        config,
+        'auto_discover_symbols',
+        default=bool_config(config, 'collect_trades', True) and len(symbols) == 0,
+    )
+
     return CCXTExchangeProfile(
         exchange_id=exchange_id,
         name=name,
         options=dict_config(config, 'options'),
-        symbols=list_str_config(config, 'symbols'),
+        symbols=symbols,
         history_params=dict_config(config, 'history_params'),
         collect_trades=bool_config(config, 'collect_trades', True),
         collect_movements=bool_config(config, 'collect_movements', True),
         collect_ledger=bool_config(config, 'collect_ledger', bool_config(config, 'include_ledger', True)),
         movement_window_days=int_config(config, 'movement_window_days', 7),
         ledger_window_days=int_config(config, 'ledger_window_days', 1),
+        auto_discover_symbols=auto_discover_symbols,
+        quote_assets=list_str_config(config, 'quote_assets', DEFAULT_DISCOVERY_QUOTE_ASSETS),
+        market_types=list_str_config(config, 'market_types'),
+        max_auto_symbols=int_config(config, 'max_auto_symbols', 500),
     )
 
 
