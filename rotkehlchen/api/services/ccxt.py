@@ -4,12 +4,7 @@ import json
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
-from rotkehlchen.exchanges.ccxt_integration import (
-    TimestampMS,
-    deduplicate_history_entries,
-    expand_profiles,
-)
-from rotkehlchen.exchanges.ccxt_runtime import create_ccxt_exchange, query_ccxt_profile_history
+from rotkehlchen.exchanges.ccxt_integration import expand_profiles
 
 if TYPE_CHECKING:
     from rotkehlchen.rotkehlchen import Rotkehlchen
@@ -109,89 +104,3 @@ class CCXTService:
 
         self._save_profiles(updated)
         return {'result': True, 'message': '', 'status_code': HTTPStatus.OK}
-
-    def preview_history(
-            self,
-            profile: dict[str, Any],
-            api_key: str,
-            api_secret: str | None,
-            start_ms: int,
-            end_ms: int | None,
-            limit: int,
-            max_pages: int,
-    ) -> dict[str, Any]:
-        try:
-            expanded_profiles = expand_profiles(profile)
-        except ValueError as e:
-            return {'result': None, 'message': str(e), 'status_code': HTTPStatus.BAD_REQUEST}
-
-        profile_results: list[dict[str, Any]] = []
-        all_trades: list[dict[str, Any]] = []
-        all_movements: list[dict[str, Any]] = []
-        all_errors: list[dict[str, Any]] = []
-        discovered_symbols: dict[str, list[str]] = {}
-
-        for expanded in expanded_profiles:
-            try:
-                exchange = create_ccxt_exchange(
-                    profile=expanded,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                )
-                result = query_ccxt_profile_history(
-                    profile=expanded,
-                    exchange=exchange,
-                    start_ms=TimestampMS(start_ms),
-                    end_ms=TimestampMS(end_ms) if end_ms is not None else None,
-                    limit=limit,
-                    max_pages=max_pages,
-                ).serialize()
-            except Exception as e:  # noqa: BLE001
-                result = {
-                    'trades': [],
-                    'movements': [],
-                    'errors': [{
-                        'profile': expanded.name,
-                        'method': 'profile_query',
-                        'message': str(e),
-                    }],
-                    'discovered_symbols': {},
-                    'summary': {
-                        'trades': 0,
-                        'movements': 0,
-                        'errors': 1,
-                        'discovered_symbols': 0,
-                    },
-                }
-
-            all_trades.extend(result['trades'])
-            all_movements.extend(result['movements'])
-            all_errors.extend(result['errors'])
-            discovered_symbols.update(result['discovered_symbols'])
-            profile_results.append({
-                'profile': expanded.serialize(),
-                'summary': result['summary'],
-                'errors': result['errors'],
-                'discovered_symbols': result['discovered_symbols'],
-            })
-
-        deduplicated_trades = deduplicate_history_entries(all_trades)
-        deduplicated_movements = deduplicate_history_entries(all_movements)
-        return {
-            'result': {
-                'profiles': profile_results,
-                'trades': deduplicated_trades,
-                'movements': deduplicated_movements,
-                'errors': all_errors,
-                'discovered_symbols': discovered_symbols,
-                'summary': {
-                    'profiles': len(expanded_profiles),
-                    'trades': len(deduplicated_trades),
-                    'movements': len(deduplicated_movements),
-                    'errors': len(all_errors),
-                    'discovered_symbols': sum(len(symbols) for symbols in discovered_symbols.values()),
-                },
-            },
-            'message': '',
-            'status_code': HTTPStatus.OK,
-        }
