@@ -12,9 +12,9 @@ import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NewType
 
-from rotkehlchen.types import TimestampMS
+TimestampMS = NewType('TimestampMS', int)
 
 MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
 TRANSIENT_CCXT_ERROR_MARKERS = (
