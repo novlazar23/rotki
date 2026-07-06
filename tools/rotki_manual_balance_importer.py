@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Import generated manual balance candidates into rotki.
 
-Default mode is a dry-run. Use --apply explicitly to write to a running local
-rotki instance. The script assumes rotki is already unlocked/logged in.
+Default mode is an offline dry-run. Use --check-existing to query a running
+rotki instance during dry-run. Use --apply explicitly to write to rotki.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ class PlannedImport:
     add_payload: dict[str, Any]
     delete_payload: dict[str, Any] | None
     existing_labels: list[str]
+    existing_check: str
 
 
 def read_json_file(path: Path) -> dict[str, Any]:
@@ -180,10 +181,11 @@ def build_plan(
         balances: list[dict[str, Any]],
         existing: list[dict[str, Any]],
         replace_prefix: str | None,
+        existing_check: str,
 ) -> PlannedImport:
     delete_payload = None
     existing_labels: list[str] = []
-    if replace_prefix is not None:
+    if replace_prefix is not None and existing_check == "online":
         delete_ids, existing_labels = select_existing_by_label_prefix(existing, replace_prefix)
         delete_payload = {"async_query": False, "ids": delete_ids} if delete_ids else None
 
@@ -192,6 +194,7 @@ def build_plan(
         add_payload={"async_query": False, "balances": balances},
         delete_payload=delete_payload,
         existing_labels=existing_labels,
+        existing_check=existing_check,
     )
 
 
@@ -199,6 +202,7 @@ def write_plan(output_path: Path | None, plan: PlannedImport) -> None:
     payload = {
         "mode": "dry_run",
         "endpoint": plan.endpoint,
+        "existing_check": plan.existing_check,
         "summary": {
             "balances_to_add": len(plan.add_payload["balances"]),
             "existing_labels_to_replace": len(plan.existing_labels),
@@ -221,6 +225,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, type=Path, help="Manual balance payload JSON")
     parser.add_argument("--url", default="http://127.0.0.1:4242", help="rotki base URL")
     parser.add_argument("--dry-run-output", type=Path, help="Write the planned API payload to a file")
+    parser.add_argument("--check-existing", action="store_true", help="Query rotki during dry-run to detect existing prefixed manual balances")
     parser.add_argument("--apply", action="store_true", help="Actually write to rotki")
     parser.add_argument("--replace-prefix", default="ccxt", help="Delete existing manual balances whose label starts with this prefix before adding")
     parser.add_argument("--no-replace", action="store_true", help="Do not delete existing prefixed manual balances before adding")
@@ -235,13 +240,20 @@ def main() -> int:
         payload = read_json_file(args.input)
         balances = load_rotki_balances_from_payload(payload, include_tags=args.include_tags)
         client = RotkiAPIClient(args.url, timeout=args.timeout)
-        existing = client.get_manual_balances()
+
+        existing: list[dict[str, Any]] = []
+        existing_check = "offline"
+        if args.apply or args.check_existing:
+            existing = client.get_manual_balances()
+            existing_check = "online"
+
         replace_prefix = None if args.no_replace else args.replace_prefix
         plan = build_plan(
             endpoint=client.base_url + "/balances/manual",
             balances=balances,
             existing=existing,
             replace_prefix=replace_prefix,
+            existing_check=existing_check,
         )
 
         if not args.apply:
