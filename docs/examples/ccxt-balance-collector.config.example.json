@@ -1,6 +1,11 @@
 {
   "min_total": "0",
   "include_zero": false,
+  "allow_symbol_fallback": true,
+  "validate_symbol_fallback": false,
+  "asset_mappings": {
+    "EXAMPLE": "eip155:1/erc20:0x0000000000000000000000000000000000000000"
+  },
   "exchanges": [
     {
       "id": "bybit",
