@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -43,7 +44,7 @@ class CCXTService:
     def _credential_location_from_profile(profile: CCXTExchangeProfile) -> Location:
         location_value = profile.credential_location or profile.exchange_id
         normalized = location_value.replace('-', '').replace('_', '').lower()
-        if normalized == 'bybit':
+        if normalized in {'bybit', 'bybiteu'}:
             return Location.BYBIT
         if normalized == 'binance':
             return Location.BINANCE
@@ -63,7 +64,24 @@ class CCXTService:
             return value.decode()
         return str(value)
 
+    @staticmethod
+    def _environment_value(name: str, required: bool) -> str | None:
+        value = os.environ.get(name)
+        if value not in (None, ''):
+            return value
+        if required is True:
+            raise ValueError(f'Missing environment variable {name}')
+        return None
+
     def resolve_profile_credentials(self, profile: CCXTExchangeProfile) -> CCXTRotkiCredentials:
+        if profile.credential_env_prefix is not None:
+            prefix = profile.credential_env_prefix.strip().upper()
+            return CCXTRotkiCredentials(
+                key=self._environment_value(f'{prefix}_KEY', required=True) or '',
+                secret=self._environment_value(f'{prefix}_SECRET', required=False),
+                passphrase=self._environment_value(f'{prefix}_PASSPHRASE', required=False),
+            )
+
         credential_name = profile.credential_name or profile.name.rsplit('-', 1)[0]
         location = self._credential_location_from_profile(profile)
         with self.rotkehlchen.data.db.conn.read_ctx() as cursor:
