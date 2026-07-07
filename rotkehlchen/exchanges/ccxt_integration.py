@@ -31,16 +31,17 @@ DEFAULT_DISCOVERY_QUOTE_ASSETS = ('USDT', 'USDC')
 class CCXTExchangeProfile:
     """One concrete CCXT query profile.
 
-    A single API key may need multiple profiles. For Bybit, for example, spot
-    trades, swap trades and unified-account movements must not all be queried
-    through one implicit defaultType because that risks wrong markets or
-    duplicate movements.
+    A single credential set may need multiple profiles. For Bybit, for example,
+    spot trades, swap trades and unified-account movements must not all be
+    queried through one implicit defaultType because that risks wrong markets
+    or duplicate movements.
     """
 
     exchange_id: str
     name: str
     credential_name: str | None
     credential_location: str | None
+    credential_env_prefix: str | None
     options: dict[str, Any]
     symbols: list[str]
     history_params: dict[str, Any]
@@ -172,6 +173,7 @@ def profile_from_config(config: Mapping[str, Any]) -> CCXTExchangeProfile:
         name=name,
         credential_name=optional_str_config(config, 'credential_name'),
         credential_location=optional_str_config(config, 'credential_location'),
+        credential_env_prefix=optional_str_config(config, 'credential_env_prefix'),
         options=dict_config(config, 'options'),
         symbols=symbols,
         history_params=dict_config(config, 'history_params'),
