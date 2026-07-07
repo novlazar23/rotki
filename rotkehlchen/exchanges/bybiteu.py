@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any
 
 from rotkehlchen.assets.asset import AssetWithOracles
+from rotkehlchen.errors.misc import RemoteError
 from rotkehlchen.exchanges.bybit import Bybit
 from rotkehlchen.fval import FVal
 from rotkehlchen.types import ApiKey, ApiSecret, Location
@@ -40,12 +41,24 @@ class Bybiteu(Bybit):
             )
 
     def first_connection(self) -> None:
-        super().first_connection()
+        """Bybit EU is UNIFIED-only; avoid user/query-api which can return retCode 141002."""
         self.is_unified_account = True
         self.first_connection_made = True
 
+    def validate_api_key(self) -> tuple[bool, str]:
+        """Validate Bybit EU credentials through a read-only Unified wallet query."""
+        try:
+            self._api_query(
+                path='account/wallet-balance',
+                options={'accountType': 'UNIFIED'},
+            )
+        except RemoteError as e:
+            return False, str(e)
+
+        return True, ''
+
     def _query_funding_balances(self) -> tuple[dict[AssetWithOracles, FVal], str | None]:
-        """Bybit EU is UNIFIED-only; the original FUND balance query fails there."""
+        """Bybit EU rejects FUND; balances are queried from UNIFIED wallet only."""
         return {}, None
 
     def _query_balances_or_error(
