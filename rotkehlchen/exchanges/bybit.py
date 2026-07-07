@@ -113,6 +113,8 @@ class Bybit(ExchangeInterface, SignatureGeneratorMixin):
             secret: ApiSecret,
             database: 'DBHandler',
             msg_aggregator: 'MessagesAggregator',
+            location: Location = Location.BYBIT,
+            uri: str = 'https://api.bybit.com/v5',
     ):
         """
         Interact with the bybit API.
@@ -125,13 +127,13 @@ class Bybit(ExchangeInterface, SignatureGeneratorMixin):
         """
         super().__init__(
             name=name,
-            location=Location.BYBIT,
+            location=location,
             api_key=api_key,
             secret=secret,
             database=database,
             msg_aggregator=msg_aggregator,
         )
-        self.uri = 'https://api.bybit.com/v5'
+        self.uri = uri
         self.session.headers.update({
             'Content-Type': 'application/json',
             'X-BAPI-SIGN-TYPE': '2',
@@ -603,7 +605,7 @@ class Bybit(ExchangeInterface, SignatureGeneratorMixin):
             try:
                 movements.extend(create_asset_movement_with_fee(
                     timestamp=ts_sec_to_ms(timestamp),
-                    location=Location.BYBIT,
+                    location=self.location,
                     location_label=self.name,
                     event_subtype=movement_subtype,
                     asset=coin,

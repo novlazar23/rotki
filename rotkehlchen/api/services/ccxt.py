@@ -44,8 +44,10 @@ class CCXTService:
     def _credential_location_from_profile(profile: CCXTExchangeProfile) -> Location:
         location_value = profile.credential_location or profile.exchange_id
         normalized = location_value.replace('-', '').replace('_', '').lower()
-        if normalized in {'bybit', 'bybiteu'}:
+        if normalized == 'bybit':
             return Location.BYBIT
+        if normalized == 'bybiteu':
+            return Location.BYBITEU
         if normalized == 'binance':
             return Location.BINANCE
         if normalized == 'okx':

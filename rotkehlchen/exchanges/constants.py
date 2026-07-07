@@ -21,6 +21,7 @@ SUPPORTED_EXCHANGES = EXCHANGES_WITH_PASSPHRASE + EXCHANGES_WITHOUT_API_SECRET +
     Location.POLONIEX,
     Location.WOO,
     Location.BYBIT,
+    Location.BYBITEU,
     Location.HTX,
     Location.GATE,
 )
