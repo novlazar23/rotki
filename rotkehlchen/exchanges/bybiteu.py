@@ -1,6 +1,7 @@
 import os
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rotkehlchen.assets.asset import AssetWithOracles
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 
 BYBITEU_EXACT_BALANCE_COINS_ENV = 'ROTKI_BYBITEU_BALANCE_COINS'
 BYBITEU_EXTRA_BALANCE_COINS_ENV = 'ROTKI_BYBITEU_EXTRA_BALANCE_COINS'
+BYBITEU_EARN_COINS_ENV = 'ROTKI_BYBITEU_EARN_COINS'
+BYBITEU_EARN_COINS_FILE_ENV = 'ROTKI_BYBITEU_EARN_COINS_FILE'
 BYBITEU_DISCOVERY_QUOTES_ENV = 'ROTKI_BYBITEU_DISCOVERY_QUOTES'
 BYBITEU_DISCOVERY_CATEGORIES_ENV = 'ROTKI_BYBITEU_DISCOVERY_CATEGORIES'
 BYBITEU_MAX_DISCOVERED_COINS_ENV = 'ROTKI_BYBITEU_MAX_DISCOVERED_COINS'
@@ -59,12 +62,27 @@ BYBITEU_AUTH_ERROR_CODES = (
 )
 
 
-def _split_env_csv(name: str) -> tuple[str, ...]:
+def _split_csv_value(value: str) -> tuple[str, ...]:
+    normalized_value = value.replace('\n', ',').replace(';', ',')
     return tuple(
-        value.strip().upper()
-        for value in os.environ.get(name, '').split(',')
-        if value.strip() != ''
+        entry.strip().upper()
+        for entry in normalized_value.split(',')
+        if entry.strip() != '' and entry.strip().startswith('#') is False
     )
+
+
+def _split_env_csv(name: str) -> tuple[str, ...]:
+    return _split_csv_value(os.environ.get(name, ''))
+
+
+def _split_file_csv(path: str) -> tuple[str, ...]:
+    if path.strip() == '':
+        return ()
+
+    try:
+        return _split_csv_value(Path(path).read_text())
+    except OSError:
+        return ()
 
 
 def _deduplicate(values: Iterable[str]) -> tuple[str, ...]:
@@ -141,6 +159,20 @@ class Bybiteu(Bybit):
         return _split_env_csv(BYBITEU_EXTRA_BALANCE_COINS_ENV)
 
     @staticmethod
+    def _configured_earn_coins() -> tuple[str, ...]:
+        """Earn-only coins that may not be discoverable through market tickers.
+
+        They can be passed directly with ROTKI_BYBITEU_EARN_COINS or through a
+        mounted CSV/text file referenced by ROTKI_BYBITEU_EARN_COINS_FILE. The
+        file mode avoids code or compose changes when Bybit adds new earn-only
+        assets.
+        """
+        return _deduplicate((
+            *_split_env_csv(BYBITEU_EARN_COINS_ENV),
+            *_split_file_csv(os.environ.get(BYBITEU_EARN_COINS_FILE_ENV, '')),
+        ))
+
+    @staticmethod
     def _configured_discovery_quotes() -> tuple[str, ...]:
         configured = _split_env_csv(BYBITEU_DISCOVERY_QUOTES_ENV)
         return configured if len(configured) != 0 else BYBITEU_DEFAULT_DISCOVERY_QUOTES
@@ -170,7 +202,8 @@ class Bybiteu(Bybit):
         """Discover balance coin candidates from public Bybit.eu market symbols.
 
         This is best-effort. Earn-only assets may not have markets, so
-        environment extras remain supported.
+        ROTKI_BYBITEU_EARN_COINS and ROTKI_BYBITEU_EARN_COINS_FILE remain
+        supported and are appended separately.
         """
         coins: list[str] = []
         quote_assets = self._configured_discovery_quotes()
@@ -209,6 +242,7 @@ class Bybiteu(Bybit):
         2. Market autodiscovery.
         3. Safe fallback coins.
         4. ROTKI_BYBITEU_EXTRA_BALANCE_COINS appended.
+        5. ROTKI_BYBITEU_EARN_COINS and ROTKI_BYBITEU_EARN_COINS_FILE appended.
         """
         exact_coins = self._configured_exact_balance_coins()
         if len(exact_coins) != 0:
@@ -218,6 +252,7 @@ class Bybiteu(Bybit):
             *self._discover_market_coins(),
             *BYBITEU_FALLBACK_BALANCE_COINS,
             *self._configured_extra_balance_coins(),
+            *self._configured_earn_coins(),
         ))
 
     def validate_api_key(self) -> tuple[bool, str]:
@@ -233,6 +268,7 @@ class Bybiteu(Bybit):
             'BTC',
             'ETH',
             *self._configured_extra_balance_coins(),
+            *self._configured_earn_coins(),
             *self._configured_exact_balance_coins(),
         ))
         last_error = ''
