@@ -55,6 +55,15 @@ class ExchangeManager:
 
         return str(location)
 
+    @staticmethod
+    def _is_bybit_eu_name(name: str) -> bool:
+        normalized = name.replace('.', '').replace('-', '').replace('_', '').replace(' ', '').lower()
+        return normalized.startswith('bybit') and (
+            'eu' in normalized or
+            'europe' in normalized or
+            'eea' in normalized
+        )
+
     def connected_and_syncing_exchanges_num(self) -> int:
         return sum(1 for _ in self.iterate_exchanges())
 
@@ -101,7 +110,7 @@ class ExchangeManager:
     ) -> tuple[bool, str]:
         """Edits both the exchange object and the database entry
 
-        Returns True if an entry was found and edited and false otherwise
+        Returns True if an entry was found and edited false otherwise
         """
         exchangeobj = self.get_exchange(name=name, location=location)
         if not exchangeobj:
@@ -212,8 +221,11 @@ class ExchangeManager:
 
         return exchange_info
 
-    def _get_exchange_module(self, location: Location) -> ModuleType:
-        module_name = self._get_exchange_module_name(location)
+    def _get_exchange_module(self, location: Location, name: str | None = None) -> ModuleType:
+        if location == Location.BYBIT and name is not None and self._is_bybit_eu_name(name):
+            module_name = 'bybiteu'
+        else:
+            module_name = self._get_exchange_module_name(location)
         try:
             module = import_module(f'rotkehlchen.exchanges.{module_name}')
         except ModuleNotFoundError:
@@ -253,7 +265,7 @@ class ExchangeManager:
             passphrase=passphrase,
         )
         exchange: ExchangeInterface = self.initialize_exchange(
-            module=self._get_exchange_module(location),
+            module=self._get_exchange_module(location, name=name),
             credentials=api_credentials,
             database=database,
             **kwargs,
@@ -319,8 +331,8 @@ class ExchangeManager:
             if location not in SUPPORTED_EXCHANGES:  # in case a no longer supported exchange key is in the DB  # noqa: E501
                 continue
 
-            module = self._get_exchange_module(location)
             for credentials in credentials_list:
+                module = self._get_exchange_module(location, name=credentials.name)
                 extras = database.get_exchange_credentials_extras(
                     name=credentials.name,
                     location=credentials.location,
